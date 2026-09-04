@@ -1,0 +1,4 @@
+Snapshot UTC: 2026-09-04 03:02:29
+Open-d4rt source: /inspire/hdd/project/wuliqifa/chenxinyan-240108120066/lfy/Open-d4rt
+DriveLM-CARLA source: /inspire/hdd/project/wuliqifa/chenxinyan-240108120066/lfy/route_collection/DriveLM-CARLA
+Open-d4rt HEAD: bead824a40f2d719246469aed3acad101287a201

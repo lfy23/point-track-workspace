@@ -1,0 +1,9 @@
+## main...origin/main
+ M eval_track3d_in_worldtrack.py
+ M infer_track_3d.py
+ M src/data/builder.py
+ M src/data/depth_query_builder.py
+?? eval_track3d_in_worldtrack.py.before_aspect_fix
+?? eval_track3d_in_worldtrack.py.before_raw_query_diagnostics
+?? infer_track_3d.py.before_aspect_fix
+?? src/data/worldtrack_npz_dataset.py

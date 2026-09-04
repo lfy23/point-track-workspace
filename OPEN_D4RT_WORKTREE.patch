@@ -1,0 +1,348 @@
+diff --git a/eval_track3d_in_worldtrack.py b/eval_track3d_in_worldtrack.py
+index ebf927a..4edacda 100644
+--- a/eval_track3d_in_worldtrack.py
++++ b/eval_track3d_in_worldtrack.py
+@@ -525,6 +525,10 @@ def main() -> int:
+                 video_model_rgb=video_model_rgb,
+                 query_uv_norm=query_uv_norm,
+                 query_chunk_size=int(args.query_chunk_size),
++                aspect_ratio_override=(
++                    float(original_w)
++                    / float(max(original_h, 1))
++                ),
+             )
+             pred_tracks_ref0 = np.asarray(pred_payload["tracks_xyz_ref0"], dtype=np.float64).transpose(1, 0, 2)
+             metrics = _metrics_for_sequence(gt_tracks_world=gt_tracks_world, pred_tracks_ref0=pred_tracks_ref0, compute_dyn=True)
+@@ -534,6 +538,125 @@ def main() -> int:
+                 scaling="global",
+                 compute_epe=True,
+             )
++
++            error_3d_by_frame = np.linalg.norm(
++                gt_tracks_world
++                - pred_tracks_aligned_global,
++                axis=-1,
++            )
++            metrics["epe_global_by_frame"] = [
++                float(np.nanmean(frame_error))
++                for frame_error in error_3d_by_frame
++            ]
++
++            _, pred_frame0_aligned, _, _, _ = (
++                _compute_average_pts_within_thresh(
++                    gt_tracks_world[:1],
++                    pred_tracks_ref0[:1],
++                    scaling="global",
++                    compute_epe=True,
++                )
++            )
++
++            gt_depth0 = np.asarray(
++                sample["tracks_xyz_cam"][0, visible_mask, 2],
++                dtype=np.float64,
++            )[finite_mask]
++            pred_depth0 = np.asarray(
++                pred_frame0_aligned[0, :, 2],
++                dtype=np.float64,
++            )
++            point_epe0 = np.linalg.norm(
++                gt_tracks_world[0]
++                - pred_frame0_aligned[0],
++                axis=-1,
++            )
++            metrics["frame0_global_epe_independent"] = (
++                float(np.nanmean(point_epe0))
++            )
++
++            depth_bands = [
++                ("0_to_10m", 0.0, 10.0),
++                ("10_to_20m", 10.0, 20.0),
++                ("20_to_40m", 20.0, 40.0),
++                ("40_to_80m", 40.0, 80.0),
++                ("over_80m", 80.0, float("inf")),
++            ]
++
++            frame0_depth_bands = {}
++
++            for name, low, high in depth_bands:
++                band = (
++                    np.isfinite(gt_depth0)
++                    & np.isfinite(pred_depth0)
++                    & (gt_depth0 >= low)
++                    & (gt_depth0 < high)
++                )
++
++                if not np.any(band):
++                    frame0_depth_bands[name] = {
++                        "count": 0,
++                    }
++                    continue
++
++                depth_ratio = (
++                    pred_depth0[band]
++                    / np.maximum(gt_depth0[band], 1e-8)
++                )
++
++                frame0_depth_bands[name] = {
++                    "count": int(band.sum()),
++                    "median_gt_depth_m": float(
++                        np.median(gt_depth0[band])
++                    ),
++                    "mean_3d_epe_m": float(
++                        np.mean(point_epe0[band])
++                    ),
++                    "median_3d_epe_m": float(
++                        np.median(point_epe0[band])
++                    ),
++                    "depth_mae_m": float(
++                        np.mean(np.abs(
++                            pred_depth0[band]
++                            - gt_depth0[band]
++                        ))
++                    ),
++                    "median_depth_ratio": float(
++                        np.median(depth_ratio)
++                    ),
++                }
++
++            metrics["frame0_depth_bands"] = (
++                frame0_depth_bands
++            )
++
++            gt_uv = np.asarray(
++                sample["tracks_uv"][:, visible_mask],
++                dtype=np.float64,
++            )[:, finite_mask]
++
++            pred_uv_norm = np.asarray(
++                pred_payload["tracks_uv_norm"],
++                dtype=np.float64,
++            ).transpose(1, 0, 2)
++
++            pred_uv_px = pred_uv_norm.copy()
++            pred_uv_px[..., 0] *= float(
++                max(original_w - 1, 1)
++            )
++            pred_uv_px[..., 1] *= float(
++                max(original_h - 1, 1)
++            )
++
++            error_2d_by_frame = np.linalg.norm(
++                gt_uv - pred_uv_px,
++                axis=-1,
++            )
++            metrics["epe_2d_px_by_frame"] = [
++                float(np.nanmean(frame_error))
++                for frame_error in error_2d_by_frame
++            ]
++
+             metrics.update(
+                 {
+                     "video_name": sample["video_name"],
+@@ -581,6 +704,20 @@ def main() -> int:
+             if bool(args.save_per_sequence):
+                 per_seq_path = subset_out_dir / f"{sample['video_name']}.json"
+                 per_seq_path.write_text(json.dumps(metrics, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
++                diagnostic_path = per_seq_path.with_suffix(".diagnostic.npz")
++                np.savez_compressed(
++                    diagnostic_path,
++                    gt_tracks_world=gt_tracks_world.astype(np.float32),
++                    pred_tracks_ref0=pred_tracks_ref0.astype(np.float32),
++                    gt_depth0=gt_depth0.astype(np.float32),
++                    query_uv_frame0=query_uv.astype(np.float32),
++                    gt_uv=gt_uv.astype(np.float32),
++                    pred_uv_px=pred_uv_px.astype(np.float32),
++                    original_image_size=np.asarray(
++                        [original_h, original_w],
++                        dtype=np.int64,
++                    ),
++                )
+ 
+         subset_summary = _aggregate_results(subset_results)
+         subset_summary["sequences"] = subset_results
+diff --git a/infer_track_3d.py b/infer_track_3d.py
+index 1c9bf41..a2f39f6 100644
+--- a/infer_track_3d.py
++++ b/infer_track_3d.py
+@@ -375,6 +375,7 @@ def _infer_tracks(
+     video_model_rgb: np.ndarray,
+     query_uv_norm: np.ndarray,
+     query_chunk_size: int,
++    aspect_ratio_override: float | None = None,
+     query_src_indices_global: np.ndarray | None = None,
+     umeyama_slide_window: bool = False,
+     umeyama_slide_window_dense: bool = False,
+@@ -384,8 +385,17 @@ def _infer_tracks(
+     num_frames = int(video_model_rgb.shape[0])
+     num_queries = int(query_uv_norm.shape[0])
+     clip_frames = _model_clip_frames(model)
++    inferred_aspect = (
++        float(video_model_rgb.shape[2])
++        / float(max(1, video_model_rgb.shape[1]))
++    )
++    aspect_value_scalar = (
++        inferred_aspect
++        if aspect_ratio_override is None
++        else float(aspect_ratio_override)
++    )
+     aspect_value = np.asarray(
+-        [[float(video_model_rgb.shape[2]) / float(max(1, video_model_rgb.shape[1]))]],
++        [[aspect_value_scalar]],
+         dtype=np.float32,
+     )
+     aspect_tensor = torch.from_numpy(aspect_value).to(device=device, dtype=torch.float32)
+diff --git a/src/data/builder.py b/src/data/builder.py
+index e7ec1eb..af34ce9 100644
+--- a/src/data/builder.py
++++ b/src/data/builder.py
+@@ -25,6 +25,7 @@ from .kubric_full_robust_preprocess_dataset import (
+ from .mixture_dataset import MixtureDataset, MixtureDatasetConfig
+ from .mvs_synth_raw_dataset import MvsSynthRawConfig, MvsSynthRawDataset
+ from .pointodyssey_raw_dataset import PointOdysseyRawConfig, PointOdysseyRawDataset
++from .worldtrack_npz_dataset import WorldTrackNPZConfig, WorldTrackNPZDataset
+ from .raw_augment import (
+     STATIC_LOCAL_GLOBAL_TGT_DELTA_CHOICES,
+     STATIC_LOCAL_GLOBAL_TGT_DELTA_PROBS,
+@@ -155,6 +156,8 @@ def _normalize_dataset_type(dataset_type: str) -> str:
+         "vitual-kitti-2": "virtual_kitti2_raw",
+         "vitual_kitti_2": "virtual_kitti2_raw",
+         "mixture": "mixture_raw",
++        "worldtrack": "worldtrack_npz",
++        "worldtrack_npz": "worldtrack_npz",
+     }
+     return aliases.get(key, key)
+ 
+@@ -343,6 +346,35 @@ def _build_kubric_full_robust_preprocess(split: str, cfg: Any, manifest_paths: l
+     )
+ 
+ 
++@DATASET_REGISTRY.register("worldtrack_npz")
++def _build_worldtrack_npz(split: str, cfg: object, manifest_paths: list[str] | None = None):
++    split_root = cfg.get_path(f"data.worldtrack_npz.{split}_root", None)
++    common_root = cfg.get_path("data.worldtrack_npz.root", None)
++    raw_root = split_root if split_root is not None else common_root
++    root = Path(str(raw_root)) if raw_root is not None and str(raw_root).strip() else None
++    return WorldTrackNPZDataset(
++        WorldTrackNPZConfig(
++            root=root,
++            manifest_paths=manifest_paths,
++            split=str(split),
++            clip_frames=_clip_frames(cfg),
++            image_size=_image_size(cfg),
++            queries_per_clip=_queries_per_clip(cfg),
++            hard_query_ratio=0.0,
++            prob_t_tgt_equals_t_cam=_prob_t_tgt_equals_t_cam(cfg),
++            **_query_timestep_delta_kwargs(cfg),
++            training=(split == "train"),
++            samples_per_file=int(cfg.get_path("data.worldtrack_npz.samples_per_file", 40)),
++            dynamic_query_ratio=(
++                None
++                if cfg.get_path("data.worldtrack_npz.dynamic_query_ratio", None) is None
++                else float(cfg.get_path("data.worldtrack_npz.dynamic_query_ratio", 0.5))
++            ),
++            seed=int(cfg.get_path("experiment.seed", 42)),
++        )
++    )
++
++
+ @DATASET_REGISTRY.register("pointodyssey_raw")
+ def _build_pointodyssey_raw(split: str, cfg: Any, manifest_paths: list[str] | None = None):
+     del manifest_paths
+diff --git a/src/data/depth_query_builder.py b/src/data/depth_query_builder.py
+index 413a7f3..7e9be55 100644
+--- a/src/data/depth_query_builder.py
++++ b/src/data/depth_query_builder.py
+@@ -289,6 +289,8 @@ def build_queries_from_trajectories(
+     prob_t_tgt_equals_t_cam: float,
+     t_src_tgt_delta_choices: tuple[int | None, ...] | None = None,
+     t_src_tgt_delta_probs: tuple[float, ...] | None = None,
++    traj_is_dynamic: np.ndarray | None = None,
++    dynamic_query_ratio: float | None = None,
+ ) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray], dict[str, np.ndarray], dict[str, np.ndarray]]:
+     """Build D4RT query/target/mask/query_stats from GT 3D trajectories.
+ 
+@@ -312,6 +314,23 @@ def build_queries_from_trajectories(
+     t_clip, n_pts, _ = traj_3d_world.shape
+     m = int(queries_per_clip)
+ 
++    dynamic_labels = None
++    desired_dynamic = np.zeros((m,), dtype=np.bool_)
++    if dynamic_query_ratio is not None and traj_is_dynamic is not None:
++        ratio = float(dynamic_query_ratio)
++        if not 0.0 <= ratio <= 1.0:
++            raise ValueError(
++                f"dynamic_query_ratio must be in [0, 1], got {ratio}"
++            )
++        dynamic_labels = np.asarray(traj_is_dynamic, dtype=bool).reshape(-1)
++        if dynamic_labels.size != n_pts:
++            raise ValueError(
++                f"traj_is_dynamic has {dynamic_labels.size} entries, expected {n_pts}"
++            )
++        dynamic_count = int(round(m * ratio))
++        desired_dynamic[:dynamic_count] = True
++        rng.shuffle(desired_dynamic)
++
+     # Need image size from depth or K to normalise pixel coords.
+     if depth is not None:
+         h, w = depth.shape[1], depth.shape[2]
+@@ -349,6 +368,7 @@ def build_queries_from_trajectories(
+     m_vis = np.zeros((m,), dtype=np.bool_)
+     m_normal = np.zeros((m,), dtype=np.bool_)
+     is_hard_query = np.zeros((m,), dtype=np.bool_)
++    is_dynamic_query = np.zeros((m,), dtype=np.bool_)
+ 
+     # -- pre-compute T_cw for every frame --------------------------------------
+     t_cw_seq = np.full((t_clip, 4, 4), np.nan, dtype=np.float32)
+@@ -444,16 +464,33 @@ def build_queries_from_trajectories(
+         if not (bool(camera_valid[fs]) and bool(camera_valid[ft]) and bool(camera_valid[fc])):
+             continue
+ 
+-        # Pick a trajectory point from eligible set at source frame.
+-        if bool(use_hard[i]) and hard_slots[fs].size > 0:
+-            picked_slot = int(hard_slots[fs][int(rng.integers(0, hard_slots[fs].size))])
+-        else:
+-            if eligible_ids[fs].size == 0:
+-                continue
+-            picked_slot = int(rng.integers(0, eligible_ids[fs].size))
++        # Pick a trajectory point from the requested class at the source frame.
+         if eligible_ids[fs].size == 0:
+             continue
++        if bool(use_hard[i]) and hard_slots[fs].size > 0:
++            candidate_slots = hard_slots[fs]
++        else:
++            candidate_slots = np.arange(eligible_ids[fs].size, dtype=np.int64)
++
++        if dynamic_labels is not None:
++            wanted = bool(desired_dynamic[i])
++            matching = candidate_slots[
++                dynamic_labels[eligible_ids[fs][candidate_slots]] == wanted
++            ]
++            if matching.size == 0 and bool(use_hard[i]):
++                all_slots = np.arange(eligible_ids[fs].size, dtype=np.int64)
++                matching = all_slots[
++                    dynamic_labels[eligible_ids[fs][all_slots]] == wanted
++                ]
++            if matching.size > 0:
++                candidate_slots = matching
++
++        picked_slot = int(
++            candidate_slots[int(rng.integers(0, candidate_slots.size))]
++        )
+         pid = int(eligible_ids[fs][picked_slot])
++        if dynamic_labels is not None:
++            is_dynamic_query[i] = bool(dynamic_labels[pid])
+         u_src = float(eligible_uv[fs][picked_slot, 0])
+         v_src = float(eligible_uv[fs][picked_slot, 1])
+         is_hard_query[i] = bool(use_hard[i]) and hard_slots[fs].size > 0
+@@ -544,7 +581,10 @@ def build_queries_from_trajectories(
+                     m_normal[i] = True
+ 
+     query = {"u": q_u, "v": q_v, "t_src": q_t_src, "t_tgt": q_t_tgt, "t_cam": q_t_cam}
+-    query_stats = {"is_hard_query": is_hard_query}
++    query_stats = {
++        "is_hard_query": is_hard_query,
++        "is_dynamic_query": is_dynamic_query,
++    }
+     target = {"xyz_3d": y_xyz, "uv_2d": y_uv, "visibility": y_vis, "displacement": y_disp, "normal": y_normal}
+     mask = {"xyz_3d": m_xyz, "uv_2d": m_uv, "visibility": m_vis, "displacement": m_disp, "normal": m_normal}
+     return query, target, mask, query_stats
